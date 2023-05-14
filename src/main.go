@@ -18,10 +18,12 @@ import (
 )
 
 type Config struct {
-	OracleDSN   string  `json:"oracleDSN"`
-	PostgresDSN string  `json:"postgresDSN"`
-	BatchSize   int     `json:"batchSize"`
-	Tables      []Table `json:"tables"`
+	OracleDSN      string  `json:"oracleDSN"`
+	OracleSchema   string  `json:"oracleSchema"`
+	PostgresDSN    string  `json:"postgresDSN"`
+	PostgresSchema string  `json:"postgresSchema"`
+	BatchSize      int     `json:"batchSize"`
+	Tables         []Table `json:"tables"`
 }
 
 type Table struct {
@@ -63,7 +65,7 @@ func main() {
 		total    int64
 	})
 	for _, table := range config.Tables {
-		rowCount, err := getRowCount(oracleDB, table.Name)
+		rowCount, err := getRowCount(oracleDB, table.Name, config.OracleSchema)
 
 		if err != nil {
 			log.Fatalf("Error getting row count for table %s: %v", table.Name, err)
@@ -88,7 +90,7 @@ func main() {
 			wg.Add(1)
 			go func(table Table) {
 				defer wg.Done()
-				migrateTable(oracleDB, postgresDB, table, config.BatchSize, progress)
+				migrateTable(oracleDB, postgresDB, table, config.BatchSize, progress, config.OracleSchema, config.PostgresSchema)
 			}(table)
 
 			processedTables[table.Name] = true
@@ -144,7 +146,7 @@ func readConfig(configFile string) (Config, error) {
 func migrateTable(oracleDB, postgresDB *sql.DB, table Table, batchSize int, progress map[string]*struct {
 	migrated int64
 	total    int64
-}) {
+}, oracleSchema string, postgresSchema string) {
 	columns := table.Columns
 	columnsJoined := joinColumns(columns)
 	placeholderValues := createPlaceholders(len(columns))
@@ -152,7 +154,7 @@ func migrateTable(oracleDB, postgresDB *sql.DB, table Table, batchSize int, prog
 	startTime := time.Now()
 
 	// Prepare the insert statement for PostgreSQL
-	insertStmt := fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)", table.Name, columnsJoined, placeholderValues)
+	insertStmt := fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES (%s)", postgresSchema, table.Name, columnsJoined, placeholderValues)
 	stmt, err := postgresDB.Prepare(insertStmt)
 	if err != nil {
 		log.Fatalf("Error preparing insert statement for table %s: %v", table.Name, err)
@@ -175,11 +177,11 @@ func migrateTable(oracleDB, postgresDB *sql.DB, table Table, batchSize int, prog
 		rows, err := oracleDB.Query(fmt.Sprintf(`
 			SELECT * FROM (
 				SELECT t.*, ROWNUM rnum FROM (
-					SELECT %s FROM %s
+					SELECT %s FROM %s.%s
 				) t
 				WHERE ROWNUM <= %d
 			)
-			WHERE rnum > %d`, columnsJoined, table.Name, offset+int64(batchSize), offset))
+			WHERE rnum > %d`, columnsJoined, oracleSchema, table.Name, offset+int64(batchSize), offset))
 		if err != nil {
 			log.Fatalf("Error querying Oracle database for table %s: %v", table.Name, err)
 		}
@@ -242,9 +244,9 @@ func createPlaceholders(columnCount int) string {
 	return strings.Join(placeholders, ", ")
 }
 
-func getRowCount(db *sql.DB, tableName string) (int64, error) {
+func getRowCount(db *sql.DB, tableName string, schema string) (int64, error) {
 	var rowCount int64
-	err := db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s", tableName)).Scan(&rowCount)
+	err := db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", schema, tableName)).Scan(&rowCount)
 	return rowCount, err
 }
 
