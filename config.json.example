@@ -19,7 +19,7 @@
     {
       "name": "table2",
       "columns": ["column1", "column2", "column3"],
-      "dependencies": []
+      "dependencies": ["table1"]
     }
   ]
 }
