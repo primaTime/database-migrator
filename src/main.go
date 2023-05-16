@@ -18,12 +18,16 @@ import (
 )
 
 type Config struct {
-	OracleDSN      string  `json:"oracleDSN"`
-	OracleSchema   string  `json:"oracleSchema"`
-	PostgresDSN    string  `json:"postgresDSN"`
-	PostgresSchema string  `json:"postgresSchema"`
-	BatchSize      int     `json:"batchSize"`
-	Tables         []Table `json:"tables"`
+	Source    DatabaseConfig `json:"source"`
+	Target    DatabaseConfig `json:"target"`
+	BatchSize int            `json:"batchSize"`
+	Tables    []Table        `json:"tables"`
+}
+
+type DatabaseConfig struct {
+	DSN    string `json:"dsn"`
+	Schema string `json:"schema"`
+	Driver string `json:"driver"`
 }
 
 type Table struct {
@@ -46,26 +50,26 @@ func main() {
 		log.Fatalf("Error reading config file: %v", err)
 	}
 
-	// Connect to Oracle database
-	oracleDB, err := sql.Open("godror", config.OracleDSN)
+	// Connect to source database
+	sourceDB, err := sql.Open(config.Source.Driver, config.Source.DSN)
 	if err != nil {
-		log.Fatalf("Oracle connection error: %v", err)
+		log.Fatalf("Source connection error: %v", err)
 	}
-	defer oracleDB.Close()
+	defer sourceDB.Close()
 
-	// Connect to PostgreSQL database
-	postgresDB, err := sql.Open("postgres", config.PostgresDSN)
+	// Connect to target database
+	targetDB, err := sql.Open(config.Target.Driver, config.Target.DSN)
 	if err != nil {
-		log.Fatalf("PostgreSQL connection error: %v", err)
+		log.Fatalf("Target connection error: %v", err)
 	}
-	defer postgresDB.Close()
+	defer targetDB.Close()
 
 	progress := make(map[string]*struct {
 		migrated int64
 		total    int64
 	})
 	for _, table := range config.Tables {
-		rowCount, err := getRowCount(oracleDB, table.Name, config.OracleSchema)
+		rowCount, err := getRowCount(sourceDB, table.Name, config.Source.Schema)
 
 		if err != nil {
 			log.Fatalf("Error getting row count for table %s: %v", table.Name, err)
@@ -90,7 +94,7 @@ func main() {
 			wg.Add(1)
 			go func(table Table) {
 				defer wg.Done()
-				migrateTable(oracleDB, postgresDB, table, config.BatchSize, progress, config.OracleSchema, config.PostgresSchema)
+				migrateTable(sourceDB, targetDB, table, config.BatchSize, progress, config.Source.Driver, config.Source.Schema, config.Target.Schema)
 			}(table)
 
 			processedTables[table.Name] = true
@@ -143,23 +147,17 @@ func readConfig(configFile string) (Config, error) {
 	return config, err
 }
 
-func migrateTable(oracleDB, postgresDB *sql.DB, table Table, batchSize int, progress map[string]*struct {
+func migrateTable(sourceDB, targetDB *sql.DB, table Table, batchSize int, progress map[string]*struct {
 	migrated int64
 	total    int64
-}, oracleSchema string, postgresSchema string) {
+}, sourceDriver string, sourceSchema string, targetSchema string) {
 	columns := table.Columns
 	columnsJoined := joinColumns(columns)
-	placeholderValues := createPlaceholders(len(columns))
 
 	startTime := time.Now()
 
-	// Prepare the insert statement for PostgreSQL
-	insertStmt := fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES (%s)", postgresSchema, table.Name, columnsJoined, placeholderValues)
-	stmt, err := postgresDB.Prepare(insertStmt)
-	if err != nil {
-		log.Fatalf("Error preparing insert statement for table %s: %v", table.Name, err)
-	}
-	defer stmt.Close()
+	// Prepare the insert statement for target database
+	insertStmt := fmt.Sprintf("INSERT INTO %s.%s (%s) VALUES", targetSchema, table.Name, columnsJoined) + " %s"
 
 	// Start progress display for this table
 	progressTicker := time.NewTicker(1 * time.Second)
@@ -173,20 +171,36 @@ func migrateTable(oracleDB, postgresDB *sql.DB, table Table, batchSize int, prog
 
 	var offset int64 = 0
 	for {
-		// Retrieve data from Oracle using pagination
-		rows, err := oracleDB.Query(fmt.Sprintf(`
-			SELECT * FROM (
-				SELECT t.*, ROWNUM rnum FROM (
-					SELECT %s FROM %s.%s
-				) t
-				WHERE ROWNUM <= %d
-			)
-			WHERE rnum > %d`, columnsJoined, oracleSchema, table.Name, offset+int64(batchSize), offset))
-		if err != nil {
-			log.Fatalf("Error querying Oracle database for table %s: %v", table.Name, err)
+		// Retrieve data from source using pagination
+		var query string
+
+		switch sourceDriver {
+		case "godror":
+			query = fmt.Sprintf(`
+					SELECT %s FROM (
+						SELECT t.*, ROWNUM rnum FROM (
+							SELECT %s FROM %s.%s
+						) t
+						WHERE ROWNUM <= %d
+					)
+					WHERE rnum > %d`, columnsJoined, columnsJoined, sourceSchema, table.Name, offset+int64(batchSize), offset)
+		case "postgres":
+			query = fmt.Sprintf(`
+					SELECT %s FROM (
+						SELECT t.*, ROW_NUMBER() OVER () AS rnum FROM (
+							SELECT %s FROM %s.%s
+						) t
+					) AS subquery
+					WHERE rnum <= %d
+					OFFSET %d`, columnsJoined, columnsJoined, sourceSchema, table.Name, offset+int64(batchSize), offset)
 		}
 
-		values := make([]interface{}, 0, len(columns)*batchSize)
+		rows, err := sourceDB.Query(query)
+		if err != nil {
+			log.Fatalf("Error querying Source database for table %s: %v", table.Name, err)
+		}
+
+		values := make([]string, 0, len(columns)*batchSize)
 		rowBatch := 0
 
 		for rows.Next() {
@@ -202,12 +216,18 @@ func migrateTable(oracleDB, postgresDB *sql.DB, table Table, batchSize int, prog
 				log.Fatalf("Error scanning row from table %s: %v", table.Name, err)
 			}
 
-			values = append(values, columnValues...)
+			stringValues := make([]string, 0)
+			for _, v := range columnValues {
+				stringValues = append(stringValues, fmt.Sprintf("'%s'", fmt.Sprint(v)))
+			}
+
+			values = append(values, fmt.Sprintf("(%s)", joinColumns(stringValues)))
 			rowBatch++
 		}
 
 		if rowBatch > 0 {
-			_, err = stmt.Exec(values...)
+			insertQuery := fmt.Sprintf(insertStmt, strings.Join(values, ", "))
+			_, err = targetDB.Exec(insertQuery)
 			if err != nil {
 				log.Fatalf("Error inserting batch into table %s: %v", table.Name, err)
 			}
@@ -236,14 +256,6 @@ func joinColumns(columns []string) string {
 	return strings.Join(columns, ", ")
 }
 
-func createPlaceholders(columnCount int) string {
-	placeholders := make([]string, columnCount)
-	for i := 0; i < columnCount; i++ {
-		placeholders[i] = fmt.Sprintf("$%d", i+1)
-	}
-	return strings.Join(placeholders, ", ")
-}
-
 func getRowCount(db *sql.DB, tableName string, schema string) (int64, error) {
 	var rowCount int64
 	err := db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s.%s", schema, tableName)).Scan(&rowCount)
@@ -259,10 +271,16 @@ func printProgress(tableName string, progress map[string]*struct {
 	remainingRows := p.total - migratedRows
 	completionPercentage := float64(migratedRows) / float64(p.total) * 100
 
-	elapsedTime := time.Since(startTime)
-	timePerRow := elapsedTime / time.Duration(migratedRows)
-	estimatedRemainingTime := time.Duration(remainingRows) * timePerRow
+	if migratedRows != 0 {
+		elapsedTime := time.Since(startTime)
+		timePerRow := elapsedTime / time.Duration(migratedRows)
+		estimatedRemainingTime := time.Duration(remainingRows) * timePerRow
 
-	fmt.Printf("Data migration progress for table %s: %d/%d rows migrated (%.2f%%), Estimated time left: %v\n",
-		tableName, migratedRows, p.total, completionPercentage, estimatedRemainingTime)
+		fmt.Printf("Data migration progress for table %s: %d/%d rows migrated (%.2f%%), Estimated time left: %v\n",
+			tableName, migratedRows, p.total, completionPercentage, estimatedRemainingTime)
+	} else {
+		fmt.Printf("Data migration progress for table %s: %d/%d rows migrated (%.2f%%)",
+			tableName, migratedRows, p.total, completionPercentage)
+	}
+
 }
