@@ -1,4 +1,4 @@
-module oracle-to-postgres-migrator
+module github.com/primatime/database-migrator
 
 go 1.20
 
