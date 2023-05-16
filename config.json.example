@@ -8,7 +8,7 @@
     "dsn": "user=postgres_user password=postgres_password host=postgres_host port=postgres_port dbname=postgres_db sslmode=disable",
     "schema": "public",
     "driver": "postgres"
-  }
+  },
   "batchSize": 1000,
   "tables": [
     {
