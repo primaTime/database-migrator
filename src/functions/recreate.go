@@ -71,9 +71,9 @@ func RecreateStructure(driver string, sourceDB *sql.DB, config Config, configPat
 			JOIN
 				all_constraints b
 			ON
-				a.r_constraint_name = b.constraint_name
+				b.r_constraint_name = a.constraint_name
 			WHERE 
-				b.table_name = '%s' AND b.owner = UPPER('%s') AND a.constraint_type = 'R'
+				b.table_name = '%s' AND b.owner = UPPER('%s') AND b.constraint_type = 'R'
 		`, tableName, schema)
 		case "postgres":
 			dependenciesQuery = fmt.Sprintf(`
