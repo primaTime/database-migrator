@@ -86,7 +86,7 @@ func MigrateTable(sourceDB, targetDB *sql.DB, table Table, batchSize int, progre
 				} else if t, ok := v.(time.Time); ok {
 					stringValues = append(stringValues, t.UTC().Format("'2006-01-02 15:04:05.00 +00:00'"))
 				} else {
-					stringValues = append(stringValues, fmt.Sprintf("'%s'", fmt.Sprint(v)))
+					stringValues = append(stringValues, fmt.Sprintf("'%s'", strings.ReplaceAll(fmt.Sprint(v), "'", "''")))
 				}
 			}
 
