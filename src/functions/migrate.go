@@ -98,6 +98,7 @@ func MigrateTable(sourceDB, targetDB *sql.DB, table Table, batchSize int, progre
 			insertQuery := fmt.Sprintf(insertStmt, strings.Join(values, ", "))
 			_, err = targetDB.Exec(insertQuery)
 			if err != nil {
+				utils.WriteStringToFile("last-query.sql", insertQuery)
 				log.Fatalf("Error inserting batch into table %s: %v", table.Name, err)
 			}
 
