@@ -39,7 +39,7 @@ func RecreateStructure(driver string, sourceDB *sql.DB, config Config, configPat
 
 		switch driver {
 		case "godror":
-			columnsQuery = fmt.Sprintf("SELECT column_name FROM all_tab_columns WHERE table_name = '%s' AND owner = UPPER('%s')", tableName, schema)
+			columnsQuery = fmt.Sprintf("SELECT column_name FROM all_tab_columns WHERE table_name = '%s' AND owner = UPPER('%s') ORDER BY COLUMN_ID", tableName, schema)
 		case "postgres":
 			columnsQuery = fmt.Sprintf("SELECT column_name FROM information_schema.columns WHERE table_name = '%s' AND table_schema = '%s'", tableName, schema)
 		}
