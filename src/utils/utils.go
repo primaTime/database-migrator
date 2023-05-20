@@ -18,6 +18,10 @@ func FilterTables(tables []Table, processedTables map[string]bool) []Table {
 
 		ready := true
 		for _, dep := range table.Dependencies {
+			if dep == table.Name {
+				continue
+			}
+
 			if !processedTables[dep] {
 				ready = false
 				break
